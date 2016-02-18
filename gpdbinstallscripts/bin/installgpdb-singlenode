@@ -1,0 +1,267 @@
+#!/bin/bash
+
+# parameters
+
+echo "INFO - Checking if the parameters is passed"
+
+if [ $# -eq 0 ]; then
+    echo "ERROR - No arguments provided, please reexecute the script along with the version of the database that you need to install (for egs <scriptname> 4.3.4.0)"
+    exit 1
+fi
+
+# Parameters for the script 
+
+echo "INFO - Generating the location / directories where the output logs will saved / stored"
+
+export version=$1
+export script=$0
+export script_basename=`basename $script`
+export script_dir=`dirname $script`/..
+cd $script_dir
+export script_dir=`pwd`
+export install_dir=`dirname $script_dir`
+export wrkdir=/tmp/wrkdir.$$
+export dldir=$script_dir/gpdbsoftwares
+export ftref=$script_dir/futurereference
+export bindir=$script_dir/bin
+export tempdir=$script_dir/tmp
+export temphostfile=${tempdir}/temphostfile
+export hostfile=${bindir}/hostlist
+echo `hostname` > ${hostfile}
+export ltusedport=${ftref}/gpdbportbase-singlenode
+export gpinitfile=${tempdir}/gpinitsystem
+export crdt=`date +"%d%m%Y%H%M%S"`
+export envfile=${ftref}/env${version}_${crdt}
+export uninstlfile=${ftref}/uninstall${version}_${crdt}
+export envstatus=$tempdir/envstatus.$crdt
+
+
+# make program directorys
+
+echo "INFO - Creating necessary directories"
+
+mkdir -p ${ftref}
+mkdir -p ${tempdir}
+
+# get the binaries for the version
+
+echo "INFO - Trying to get the gpdb binaries for the version:" $version "at location:" $dldir
+
+ls -tr $dldir | grep -v appliance | grep $version &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	binary_file=$dldir/`ls -tr $dldir | grep -v appliance | grep $version | tail -1`
+	echo "INFO - Found the binaries for the version" $version ":" $binary_file
+else
+	echo "ERROR - No binaries for the version" $version "found at location" $dldir "use \"downloadgpdb\" executable to download the version of gpdb"
+	exit
+fi
+# echo $binary_file
+
+# Checking if there is a previous installation of gpdb version 
+
+echo "INFO - Checking if there is a previous installation of gpdb version:" $version
+
+if [ `ls ${ftref} | grep env$version | wc -l` != "0" ] ; then
+  echo -e "Environment File\t\t\tMaster Port\t\t\tStatus"   > $envstatus
+  echo "-----------------------------------------------------------------------------------------------"    >> $envstatus
+  ls -1 ${ftref} | grep env$version | while read line
+  do    
+    source ${ftref}/$line
+    psql -d template1 -p $PGPORT -Atc "select 1" &>/dev/null
+    retcode=$?
+    if [ "$retcode" == "0" ]; then
+      echo -e "$line\t\t\t$PGPORT\t\t\tRUNNING"   >> $envstatus
+    else
+      echo -e "$line\t\t\t$PGPORT\t\t\tUNKNOWN/STOPPED/FAILED"  >> $envstatus
+    fi
+  done
+  echo "INFO - Found older installation of gpdb for the version:" $version ", You can use \"envgpdb <version>\" to set the environment for that installation"
+  printf "\n"
+  cat $envstatus
+  printf "\n"
+  while true 
+  do
+    read -p "Do you wish to continue[y/n]?" response
+    if [ $response == "Y" ] || [ $response == "y" ]; then
+      break
+      elif [ $response == "n" ] || [ $response == "N" ]; then
+      echo "INFO - exiting.."
+      exit
+    else
+      echo "Invalid response, type in y/n"
+    fi
+  done
+fi
+
+# Checking if the file is bin or zip file
+
+echo "INFO - Unzipping if its a zip file else continue further" 
+
+binorzip=`echo $binary_file|tail -c 4`
+if [ "$binorzip" == "zip" ];
+	then
+	unzip -o $binary_file -d $dldir
+	binary_file=`echo $binary_file | sed 's/...$/bin/'`
+fi
+# echo $binary_file
+
+# install the binaries on master 
+
+echo "INFO - Installing the binaries"
+
+/bin/bash $binary_file &>/dev/null << EOF 
+yes
+/usr/local/greenplum-db-$version
+yes
+yes
+EOF
+
+# Checking the health of the host
+
+echo "INFO - Checking the health of the host"
+touch /usr/local/testingtouch /data/primary/testingtouch /data/master/testingtouch &> /dev/null
+retcode=$?
+if [ "$retcode" != "0" ]; then
+		echo "ERROR - The host" $line "disk location either /usr/local,/data/primary,/data/master cannot be used, skipping the installation ...."
+		exit 
+fi
+
+# Function : to check if the port is in use 
+
+echo "INFO - Loading the function to check if the port base is currently being used"
+
+port_base_usage() {
+
+found=''
+counter=''
+while [ ! $found ]; do
+  found=1
+  for host in $(cat $hostfile); do
+    for counter in 0 1 ; do
+      testport=$(($PORT_BASE+$counter))
+      if [ -n "$(ssh -o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=no -n $host "netstat -lanp 2>/dev/null | grep $testport")" ]; then
+        found=''
+        break
+      fi
+    done
+    if [ ! $found ]; then
+      break
+    fi
+  done
+  if [ ! $found ]; then
+    PORT_BASE=$(($PORT_BASE+3))
+    fi
+done
+}
+
+# Creating the gpinitsystem file 
+
+echo "INFO - Creating the gpinitsystem file"
+ARRAY_NAME="gp${version}_${crdt}"
+MACHINE_LIST_FILE=$hostfile
+SEG_PREFIX="gp${version}_${crdt}"
+MASTER_HOSTNAME=127.0.0.1
+MASTER_DIRECTORY=/data/master
+DATABASE_NAME=flightdata
+if [ -f "$ltusedport" ]; then
+  PORT_BASE=`grep PORT_BASE $ltusedport|cut -d':' -f2`
+  MASTER_PORT=`grep MASTER_PORT $ltusedport|cut -d':' -f2`
+else 
+  PORT_BASE=30000
+  MASTER_PORT=3000
+fi
+
+for counter in $MASTER_PORT
+do
+  while [ -n "$(netstat -lanp 2>/dev/null | grep $counter )" ]; do
+    counter=$(($MASTER_PORT+1))
+    MASTER_PORT=$counter
+    # echo $MASTER_PORT
+  done
+done
+
+port_base_usage
+
+echo "ARRAY_NAME=$ARRAY_NAME" > $gpinitfile
+echo "MACHINE_LIST_FILE=$MACHINE_LIST_FILE" >> $gpinitfile
+echo "SEG_PREFIX=$SEG_PREFIX" >> $gpinitfile
+echo "MASTER_HOSTNAME=$MASTER_HOSTNAME" >> $gpinitfile
+echo "MASTER_DIRECTORY=$MASTER_DIRECTORY" >> $gpinitfile
+echo "PORT_BASE=$PORT_BASE" >> $gpinitfile
+echo "MASTER_PORT=$MASTER_PORT" >> $gpinitfile
+echo "DATABASE_NAME=$DATABASE_NAME" >> $gpinitfile
+echo "declare -a DATA_DIRECTORY=(/data/primary /data/primary)" >> $gpinitfile
+
+# Creating the gpdb environment
+
+echo "INFO - Executing the gpinitsystem command to install the cluster"
+source /usr/local/greenplum-db-$version/greenplum_path.sh
+gpinitsystem -c $gpinitfile -h $hostfile -a
+
+# Checking if the database is installed or failed
+
+psql -p $MASTER_PORT -d template1 -Atc "select 1" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+  echo "INFO - The gpinitsystem run was a success"
+else
+  echo "ERROR - The gpinitsystem run failed, exiting.."
+  echo "ERROR - Check the gpinitsystem log at gpAdminlogs folder or grep \"semaphore\" /home/gpadmin/gpAdminLogs/gpinitsystem_"`date +"%Y%m%d"`".log" 
+  echo "ERROR - If the installation failed due to semaphore then stop older database running on the machine or issue \"stopallgpdbinstance\" to stop all database on the server"
+  exit
+fi
+
+# Storing the environment variables for this install
+
+echo "INFO - Storing the environment variables for this install"
+
+echo "source /usr/local/greenplum-db-$version/greenplum_path.sh" > $envfile
+echo "export MASTER_DATA_DIRECTORY=$MASTER_DIRECTORY/${SEG_PREFIX}-1" >> $envfile
+echo "export PGPORT=$MASTER_PORT" >> $envfile
+echo "export PGDATABASE=flightdata" >> $envfile
+
+# Storing the PORT BASE & MASTER PORT for future reference
+
+echo "INFO - Storing the PORT BASE & MASTER PORT for future reference"
+
+echo "PORT_BASE:$(($PORT_BASE+2))" > $ltusedport
+echo "MASTER_PORT:$(($MASTER_PORT+1))" >> $ltusedport
+
+# Remove the last user port file if the port reaches 62k since the limit of port that can be used on unix is 64k , removing this will recycle the ports
+
+echo "INFO - Checking if the port exceeds 62k to recycle the ports"
+
+if [ $PORT_BASE -gt 62000 ]; then
+  echo "INFO - The last used port base has execeeded 62k removing the last used port file"
+  rm -rf $ltusedport
+else
+  echo "INFO - The last used port is withing the unix port range of 64k"
+fi
+
+# Creating the uninstall script for this installation
+
+echo "INFO - Creating the uninstall script for this installation"
+
+psql -p $MASTER_PORT -d template1 -Atc "select \$\$ps -ef|grep postgres|grep -v grep|grep \$\$ ||  port || \$\$ | awk '{print \$2}'| xargs -n1 /bin/kill -11 &>/dev/null\$\$ from gp_segment_configuration union select \$\$rm -rf /tmp/.s.PGSQL.\$\$ || port || \$\$*\$\$ from gp_segment_configuration union select \$\$rm -rf \$\$ || fselocation from pg_filespace_entry" 2>&1 > ${uninstlfile}
+echo "rm -rf ${envfile}" >> ${uninstlfile}
+echo "rm -rf ${uninstlfile}" >> ${uninstlfile}
+
+# Cleaning the temporary files created
+
+echo "INFO - Cleaning the temporary files created"
+
+rm -rf /usr/local/testingtouch /data/primary/testingtouch /data/master/testingtouch &>/dev/null
+rm -rf $temphostfile &>/dev/null
+rm -rf $envstatus &>/dev/null
+
+# Successful message
+
+echo "INFO - Installation of the environment has been completed successfully "
+
+# Setting the environment of the installation
+
+echo -e "INFO - Source the below file to use the current installed environment (since the source only works on the current shell)\n"
+
+echo "source $envfile"
+printf "\n"

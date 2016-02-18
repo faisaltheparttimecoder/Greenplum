@@ -1,0 +1,368 @@
+#!/bin/bash
+
+# parameters
+
+echo "INFO - Checking if the parameters is passed"
+
+if [ $# -eq 0 ]; then
+    echo "ERROR - No/missing arguments, please reexecute the script along with the dbversion & ccversion that you need to install (for egs <scriptname> 4.3.4.0 1.3.0.3)"
+    exit 1
+fi
+
+# Parameters for the script 
+
+echo "INFO - Generating the location / directories where the output logs will saved / stored"
+
+export version=$1
+export ccversion=$2
+export script=$0
+export script_basename=`basename $script`
+export script_dir=`dirname $script`/..
+cd $script_dir
+export script_dir=`pwd`
+export install_dir=`dirname $script_dir`
+export wrkdir=/tmp/wrkdir.$$
+export dldir=$script_dir/gpdbsoftwares
+export ftref=$script_dir/futurereference
+export bindir=$script_dir/bin
+export tempdir=$script_dir/tmp
+export ltusedccport=${ftref}/gpccportbase
+export crdt=`date +"%d%m%Y%H%M%S"`
+export envstatus=$tempdir/envstatus.$crdt
+
+# Checking if the ccversion has only 1 decimal point , if yes then we need to add a zero , since the software comes with 2.0.0 or 3.0.0
+
+if [ ${#ccversion} -eq 3 ]; then
+	ccversion=`echo $ccversion".0"`
+fi
+
+# make program directorys
+
+echo "INFO - Creating necessary directories"
+
+mkdir -p ${ftref}
+mkdir -p ${tempdir}
+
+# Function: To check if the database is accessiable
+
+echo "INFO - Building function to check the database is accessiable to be used later in the script"
+
+db_health_chk() {
+
+psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+	retcode=$?
+	if [ "$retcode" == "0" ]; then
+		echo "INFO - The environment is up and running and you are good to go"
+	else 
+		echo "ERROR - Failure in getting health of the database environment"
+		exit
+	fi
+}
+
+# Get the environment file
+
+echo "INFO - Getting the environment information of the gpdb cluster with version:" $version
+
+version_file_count=`ls ${ftref} | grep env$version | wc -l`
+if [  "$version_file_count" == "0" ]; then
+	echo "ERROR - No prior installation of gpdb found, please use \"installgpdb <version>\" to install the database environment "
+	exit
+elif [ "$version_file_count" == "1" ]; then
+	location="${ftref}/`ls -1 ${ftref} | grep env$version`"
+	source $location
+else
+	echo -e "Environment File\t\t\tMaster Port\t\t\tStatus"   > $envstatus
+  	echo "-----------------------------------------------------------------------------------------------"    >> $envstatus
+  	ls -1 ${ftref} | grep env$version | while read line
+  	do    
+  	source ${ftref}/$line
+    psql -d template1 -p $PGPORT -Atc "select 1" &>/dev/null
+    retcode=$?
+    if [ "$retcode" == "0" ]; then
+      echo -e "$line\t\t\t$PGPORT\t\t\tRUNNING"   >> $envstatus
+    else
+      echo -e "$line\t\t\t$PGPORT\t\t\tUNKNOWN/STOPPED/FAILED"  >> $envstatus
+    fi
+  	done
+	printf "\n"
+	cat $envstatus
+	printf "\n"
+	while true 
+	do
+		read -p "Found multiple installation for the gpdb version: $version, which one do you want to use? " response
+		if [ `ls ${ftref} | grep $response | wc -l` == "1" ]; then
+			location="${ftref}/$response"
+			source $location
+			break
+		else
+			echo "Invalid response, Could not find the values that was typed in, try again ..."
+		fi
+    done
+fi
+
+# Checking is the database started else start the database
+
+psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - The environment is up and running and you are good to go"
+else
+	echo "INFO - The database is not started, starting the database environment up"
+	gpstart -a
+	db_health_chk
+fi
+
+# Unnstallation of the previous version of command center on the database environment 
+
+uninstall_gpcc() {
+
+	echo "INFO - Uninstall existing GPCC has been called , cleaning up the exiting GPCC installed in the database with version:" $version
+	cc_instance=`grep cc_instance $location| cut -d'=' -f2`
+	gpcmdr --stop $cc_instance &>/dev/null
+	rm -rf $GPPERFMONHOME/instances/$cc_instance
+	gpconfig -c gp_enable_gpperfmon -v off &>/dev/null
+	cp $MASTER_DATA_DIRECTORY/pg_hba.conf $MASTER_DATA_DIRECTORY/pg_hba.conf.$crdt
+	grep -v gpmon $MASTER_DATA_DIRECTORY/pg_hba.conf.$crdt > $MASTER_DATA_DIRECTORY/pg_hba.conf
+	rm -rf $MASTER_DATA_DIRECTORY/pg_hba.conf.$crdt
+	psql -d template1 -p $PGPORT -Atc "drop database if exists gpperfmon" &>/dev/null
+	psql -d template1 -p $PGPORT -Atc "drop role gpmon" &>/dev/null
+	rm -rf $MASTER_DATA_DIRECTORY/gpperfmon/*
+	cp $location $location.$crdt
+	egrep -v "greenplum-cc-web|cc_instance|cc_port" $location.$crdt > $location
+	rm -rf $location.$crdt
+	gpstop -afr
+	db_health_chk
+}
+
+# Checking for command center on the database environment 
+
+echo "INFO - Checking for existence of the command center on the gpdb environment"
+
+psql -d gpperfmon -p $PGPORT -Atc "select * from system_now;" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - Found older version of the command center running on the environment or gpperfmon database already running on the database"
+	echo "INFO - Displaying the content of env file $location"
+	printf "\n"
+	cat $location
+	printf "\n"
+	while true 
+	do
+		read -p "Would you like to use the previous gpperfmon installation, you can use \"envgpdb <version>\" to set the environment or do you wish to continue with a fresh install [y/n]?" response
+		if [ $response == "Y" ] || [ $response == "y" ]; then
+			echo "INFO - Calling the uninstall function to remove existing GPCC"
+			uninstall_gpcc
+			break
+		elif [ $response == "n" ] || [ $response == "N" ]; then
+			echo "INFO - exiting.."
+			exit
+		else
+			echo "Invalid response, type in y/n"
+		fi
+	done
+else
+	echo "INFO - No previous command center installation found, continue"
+fi
+
+# get the binaries for the version
+
+echo "INFO - Trying to get the command center binaries for the version:" $ccversion "at location:" $dldir
+
+ls -tr $dldir | grep greenplum-cc-web | grep $ccversion &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	binary_file=$dldir/`ls -tr $dldir | grep greenplum-cc-web | grep $ccversion | tail -1`
+	echo "INFO - Found the binaries for the version" $ccversion ":" $binary_file
+else
+	echo "ERROR - No command center binaries for the version" $ccversion "found at location" $dldir "use \"downloadgpcc\" executable to download the version of command center or check the parameters passed"
+	exit
+fi
+# echo $binary_file
+
+# Checking if the file is bin or zip file
+
+echo "INFO - Unzipping if its a zip file else continue further" 
+
+binorzip=`echo $binary_file|tail -c 4`
+if [ "$binorzip" == "zip" ];
+	then
+	unzip -o $binary_file -d $dldir
+	binary_file=`echo $binary_file | sed 's/...$/bin/'`
+fi
+# echo $binary_file
+
+# install the binaries on master 
+
+echo "INFO - Installing the binaries"
+
+buildnumber=`echo $binary_file|cut -d'-' -f6`
+ccversion_from_file=`echo $binary_file|cut -d'-' -f4`
+ccversion=$ccversion_from_file
+
+/bin/bash $binary_file &>/dev/null << EOF 
+yes
+/usr/local/greenplum-cc-web-$ccversion-build-$buildnumber
+yes
+yes
+EOF
+
+# Checking if this is a single node install or multi node install.
+
+source $location
+source /usr/local/greenplum-cc-web-$ccversion-build-$buildnumber/gpcc_path.sh
+psql -d template1 -p $PGPORT -Atc "select distinct hostname from gp_segment_configuration" -o ${tempdir}/hostlist
+if [ `cat ${tempdir}/hostlist | wc -l ` == "1" ]; then
+	echo "INFO - This is a single node gpcc installation, no need to call gpccinstall executable"
+else
+	echo "INFO - This is a multi node gpcc installation, calling gpccinstall executable"
+	gpccinstall -f ${tempdir}/hostlist
+fi
+
+# Enabling command center agents
+
+echo "INFO - Enabling command center agents"
+
+gpperfmon_install --enable --password changeme --port $PGPORT
+echo "host      all     gpmon    0.0.0.0/0    md5" >> $MASTER_DATA_DIRECTORY/pg_hba.conf
+echo "host     all         gpmon         ::1/128       md5" >> $MASTER_DATA_DIRECTORY/pg_hba.conf
+
+# Restart the database
+
+echo "INFO - Restarting the database to start the gpmon agents"
+
+gpstop -afr
+db_health_chk
+
+# Verfication of the gpmon agents & database
+
+echo "INFO - Verying if the gpmon agents and gpperfmon is successfully instaled"
+
+gpmmon_count=`ps -ef | grep gpmmon | grep $PGPORT | grep -v grep | wc -l`
+#echo $PGPORT
+#echo $gpmmon_count
+if [ "$gpmmon_count" == "1" ] ; then 
+	echo "INFO - command center gpmmon process check - PASSED"
+else
+	echo "ERROR - command center gpmmon process check - FAILED"
+	exit
+fi
+
+echo "INFO - Checking if the gpperfmon database is accessiable"
+
+psql -d gpperfmon -p $PGPORT -Atc "select * from system_now;" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - command center database (gpperfmon) check - PASSED"
+else
+	echo "INFO - command center database (gpperfmon) check - FAILED"
+	exit
+fi
+
+# Installing the web UI of this install
+
+echo "INFO - Installing the web UI of this GPCC install"
+
+if [ -f "$ltusedccport" ]; then
+  GPCC_BASE=`grep GPCC_BASE $ltusedccport|cut -d':' -f2`
+else 
+  GPCC_BASE=28080
+fi
+
+for counter in $GPCC_BASE
+do
+  while [ -n "$(netstat -lanp 2>/dev/null | grep $counter)" ]; do
+    counter=$(($GPCC_BASE+1))
+    GPCC_BASE=$counter
+    # echo $GPCC_BASE
+  done
+done
+
+gpdbversion=`echo $version | sed 's/\.//g'`
+gpccversion=`echo $ccversion | sed 's/\.//g'`
+
+cc_instance_name=gpcc_${gpdbversion}_${gpccversion}_`date +"%s"`
+
+if [ `echo $ccversion|head -c 1` -gt 1 ]; then
+gpcmdr --setup &>/dev/null << EOF
+$cc_instance_name
+n
+$cc_instance_name
+$PGPORT
+y
+$GPCC_BASE
+n
+n
+n
+n    
+EOF
+else
+gpcmdr --setup &>/dev/null << EOF
+$cc_instance_name
+n
+$cc_instance_name
+$PGPORT
+$GPCC_BASE
+n
+n
+n
+n    
+EOF
+fi
+
+# Starting the gpcc instance 
+
+gpcmdr --start $cc_instance_name &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - Installing/Starting the web UI for the GPCC interface was a success"
+else
+	echo "ERROR - couldn't start the GPCC web interface, please retry manually using gpcmdr --setup"
+	exit
+fi
+
+# Adding the environment of command center to the environment file of the database
+
+echo "source /usr/local/greenplum-cc-web-$ccversion-build-$buildnumber/gpcc_path.sh" >> $location 
+echo "export cc_instance=$cc_instance_name" >> $location
+echo "export cc_port=$GPCC_BASE" >> $location
+
+# Storing the PORT BASE & MASTER PORT for future reference
+
+echo "INFO - Storing the GPCC PORT BASE for future reference"
+
+echo "GPCC_BASE:$(($GPCC_BASE+1))" > $ltusedccport
+
+# Cleaning the temporary files created
+
+echo "INFO - Cleaning the temporary files created"
+
+rm -rf $envstatus &>/dev/null
+
+# Remove the last user port file if the port reaches 62k since the limit of port that can be used on unix is 64k , removing this will recycle the ports
+
+echo "INFO - Checking if the port exceeds 62k to recycle the ports"
+
+if [ $GPCC_BASE -gt 62000 ]; then
+  echo "INFO - The last used port base has execeeded 62k removing the last used port file"
+  rm -rf $ltusedccport
+else
+  echo "INFO - The last used port is withing the unix port range of 64k"
+fi
+
+# Successful message
+
+echo "INFO - Setting up environment is complete"
+
+# Getting the ip of the server 
+
+# This doesnt work as some servers doesnt have the ip command configured
+# ipadd=$(ip addr | grep 'state UP' -A2 | tail -n1 | awk '{print $2}' | cut -f1  -d'/')
+
+# Setting the environment of the installation
+
+echo -e "INFO - Source the below file to use your environment (since the source only works on the current shell)\n"
+echo "source $location"
+printf "\n"
+
+echo "MESG - Password for gpmon user is \"changeme\" "
+echo "MESG - Web URL of the GPCC instance is \"http://<external-ip-address or hostname-of-this-server>:${GPCC_BASE}/\" "

@@ -1,0 +1,373 @@
+#!/bin/bash
+
+# Check if the parameters has been passed
+
+if [ $# -eq 0 ]; then
+    echo "Invalid Usage:"
+    echo -e "\t" `basename $0` "[gpdb|gpcc|gpextras] [-d]"
+    echo -e "\t" `basename $0` "-h"
+    exit 2
+elif [ $1 == "-h" ]; then
+	echo -e "\t" `basename $0` "[gpdb|gpcc|gpextras] [-d]"
+	exit 0
+elif [ $1 == "gpdb" ] || [ $1 == "gpcc" ] || [ $1 == "gpextras" ] ; then
+	export to_download=$1
+else
+    echo "Invalid Usage:"
+    echo -e "\t" `basename $0` "[gpdb|gpcc|gpextras] [-d]"
+    echo -e "\t" `basename $0` "-h"
+    exit 2
+fi
+
+# Program starts
+
+echo "INFO - Starting the program"
+
+[ "$2" = "-d" ] && debug=on || debug=off
+
+# Parameters for the script 
+
+echo "INFO - Generating the directories name / location where the output logs will saved / stored"
+
+export script=$0
+export script_basename=`basename $script`
+export script_dir=`dirname $script`/..
+cd $script_dir
+export script_dir=`pwd`
+export install_dir=`dirname $script_dir`
+export tmpdir=$script_dir/tmp
+export wrkdir=/tmp/wrkdir.$$
+export dldir=$script_dir/gpdbsoftwares
+#export api_token="aaaaaAaAAAaaaaAAAAAaaa"
+export prod_name="Pivotal Greenplum"
+
+# Make working directory
+
+echo "INFO - Creating the directory needed for the program"
+
+mkdir -p ${wrkdir}
+mkdir -p ${dldir}
+
+# Clean up function
+
+clean_up()
+{
+	trap ":" 1 2 3 15
+	if [ "${SIGSET}" ]
+	then
+		printf "\n%s aborted...\n"  $(basename $0)
+		[ -f "${dldir}/${target_file}" ] && rm -f ${dldir}/${target_file}
+	fi
+	[ "${wrkdir}" ] && rm -rf ${wrkdir}
+}
+
+# Clean up if the script is quit
+
+trap "SIGSET=TRUE;clean_up;exit 1" 1 2 3 15
+
+# Get download directory or hard code and remove the next hash mark
+
+echo "INFO - Setting the download directory to: " $dldir
+
+while [ -z ${dldir} ]; do
+	read -p "Enter the download directory : " dldir
+	if [ ! -d "${dldir}" ]
+	then
+		printf "\n%s does not exist...\n" ${dldir}
+		unset dldir
+	elif [ ! -w "${dldir}" ]
+	then
+		printf "\n%s is not writable...\n" ${dldir}
+		unset dldir
+	fi
+done
+[ ${debug} = 'on' ] && echo "dldir=\""${dldir}"\""
+
+# Get api_token or hard code and remove the next hash mark
+
+echo "INFO - Setting the connection token" 
+
+if [ -z ${api_token} ]; then
+	echo -e "\nTo get your API Token"
+	echo -e "\n \t + Connect to network.pivotal.io with your username / password"
+	echo -e "\t + Click on Edit profile"
+	echo -e "\t + Scroll to the bottom on the page where you will see your API Token. \n"
+fi
+
+[ -z ${api_token} ] && read -p "Enter your network.pivotal.io API Token: " api_token
+[ ${debug} = 'on' ] && echo "api_token=\""${api_token}"\""
+
+# Authenticate
+
+echo "INFO - Authenticating the API Token" 
+
+curl --silent -i -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Token ${api_token}" -X GET https://network.pivotal.io/api/v2/authentication > ${wrkdir}/authenticate
+
+if [ $(grep -c "HTTP/1.1 200 OK" ${wrkdir}/authenticate) -ne 1 ]
+then
+	printf "Authentication failed, please check your API Token and try again.  Exiting...\n"
+cat ${wrkdir}/authenticate
+	clean_up
+	exit 1
+fi
+
+# Get products list
+
+echo "INFO - Getting the product list"
+
+curl --silent -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Token ${api_token}" -X GET https://network.pivotal.io/api/v2/products | python -mjson.tool > ${wrkdir}/prod_list
+grep '"name":' ${wrkdir}/prod_list | egrep -vi 'suite|foundry|buildpacks' | cut -d'"' -f4 | sort > ${wrkdir}/prod_name_list
+
+# Get product name
+
+echo "INFO - Setting the product list to: " $prod_name  
+
+if [ $(grep -c "^${prod_name}$" ${wrkdir}/prod_name_list) -eq 1 ]
+	then
+	echo "INFO - Product name \""$prod_name"\" found, continue ..."
+else
+	echo "WARN - Couldn't find the product name \""$prod_name"\" from the product list something could have changed, please pick up the exact name from below" 
+	printf "\nThese are the available products:\n\n"
+	column ${wrkdir}/prod_name_list | grep Greenplum
+	printf "\n"
+	while true; do
+		read -p "Which product do you want to download? " prod_name
+		if [ $(grep -c "^${prod_name}$" ${wrkdir}/prod_name_list) -eq 1 ]
+			then
+			break
+		else
+			printf "Sorry can't find that product, please re-enter the product name from the list above\n"
+		fi
+	done
+fi
+[ ${debug} = 'on' ] && echo "Product Name=\""${prod_name}"\""
+
+# Get slug
+
+echo "INFO - Getting the Slug ID"
+
+export prod_slug=$(sed -n "/\"${prod_name}\"/,/\"slug\"/p" ${wrkdir}/prod_list | tail -1 | cut -d'"' -f4)
+[ ${debug} = 'on' ] && echo "prod_slug=\""${prod_slug}"\""
+
+# Get product ID
+
+echo "INFO - Getting the Product ID"
+
+export prod_id=$(curl --silent -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Token ${api_token}" -X GET https://network.pivotal.io/api/v2/products | python -mjson.tool | sed -n "/${prod_slug}\/releases/,/\"id\":/p" | tail -1 | tr -dc '[:digit:]')
+[ ${debug} = 'on' ] && echo "prod_id=\""${prod_id}"\""
+
+# Get the release
+
+echo "INFO - Getting the Releases"
+
+curl --silent -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Token ${api_token}" -X GET https://network.pivotal.io/api/v2/products/${prod_slug}/releases | python -mjson.tool > ${wrkdir}/prod_releases
+
+# Get version
+
+echo "INFO - Getting the product version"
+
+printf "\nThese are the available versions:\n\n"
+grep '"version":' ${wrkdir}/prod_releases | cut -d'"' -f4
+printf "\n"
+while true; do
+	read -p "Which version of greenplum database do you want to download (for eg.s 4.3.4.0) ? " prod_version
+	if [ $(grep -c "\"version\": \"${prod_version}\"" ${wrkdir}/prod_releases) -eq 1 ]
+	then
+		break
+	else
+		printf "Sorry can't find that version, please re-enter the product version from the list above\n"
+	fi
+done
+[ ${debug} = 'on' ] && echo "prod_version=\""${prod_version}"\""
+
+# Get release ID
+
+echo "INFO - Getting the Release ID"
+
+export rel_id=$(tac ${wrkdir}/prod_releases | sed -n "/${prod_version}/,/id/p"|tail -1|tr -dc '[:digit:]')
+[ ${debug} = 'on' ] && echo "rel_id=\""${rel_id}"\""
+
+# Get file ID
+
+echo "INFO - Getting the File ID"
+
+curl --silent -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Token ${api_token}" -X GET https://network.pivotal.io/api/v2/products/${prod_slug}/releases/${rel_id} | python -mjson.tool > ${wrkdir}/prod_fileid
+
+# Get file to download
+
+echo "INFO - Obtaining the files available for the release"
+
+fn_download_url() {
+
+	echo -e "INFO - Setting up request to download the file: " $prod_file
+
+	export download_url=$(tac ${wrkdir}/prod_fileid | sed -n "/\"name\": \"${prod_file}\"/,/\/download\"/p"|tail -1|cut -d'"' -f4)
+	[ ${debug} = 'on' ] && echo "download_url=\""${download_url}"\""
+
+	export target_file=$(basename $(tac ${wrkdir}/prod_fileid | sed -n "/\"name\": \"${prod_file}\"/,/aws_object_key/p"|tail -1|cut -d'"' -f4))
+	[ ${debug} = 'on' ] && echo "target_file=\""${target_file}"\""
+
+}
+
+
+if [ $to_download == "gpdb" ]; then
+
+	export prod_file_prefix="Greenplum Database"
+	export prod_file_suffix_1="for Red Hat Enterprise Linux 5 and 6"
+	export prod_file_suffix_2="for Red Hat Enterprise Linux 5, 6 and 7"
+	
+	prod_file_1="$prod_file_prefix $prod_version $prod_file_suffix_1"
+	prod_file_2="$prod_file_prefix $prod_version $prod_file_suffix_2"
+	
+	if [ $(grep -c "\"name\": \"${prod_file_1}\"" ${wrkdir}/prod_fileid) -eq 1 ]; then
+	
+		prod_file=$prod_file_1
+		echo "INFO - Found the file \""$prod_file"\" in the file list, continue ...."
+		fn_download_url	
+
+	elif [ $(grep -c "\"name\": \"${prod_file_2}\"" ${wrkdir}/prod_fileid) -eq 1 ]; then
+
+		prod_file=$prod_file_2
+		echo "INFO - Found the file \""$prod_file"\" in the file list, continue ...."
+		fn_download_url
+		
+	else
+		
+		echo "WARN - Couldn't find the product name \""$prod_file_2"\" from the product list something could have changed, please pick up the exact name from below" 
+		printf "\nThese are the available files:\n\n"
+		sed -n "/\"download\":/,/\"name\":/p" ${wrkdir}/prod_fileid | grep name | grep "Database" | grep "Red Hat Enterprise Linux" | cut -d'"' -f4
+		printf "\n"
+	
+		while true; do
+			read -p "Which do you want to download (Copy the file name from above)? " prod_file
+			if [ $(grep -c "\"name\": \"${prod_file}\"" ${wrkdir}/prod_fileid) -eq 1 ]; then
+				fn_download_url
+				break
+			else
+				printf "Sorry can't find that file, please re-enter the product file from the list above\n"
+			fi
+			done
+
+	fi
+
+elif [ $to_download == "gpcc" ]; then
+
+	export prod_file_prefix="Greenplum Database - Command Center"
+	export prod_file_suffix="Release Notes"
+	
+	printf "\nThese are the available files:\n\n"
+	sed -n "/\"download\":/,/\"name\":/p" ${wrkdir}/prod_fileid | grep name | cut -d'"' -f4 | grep "$prod_file_prefix" | grep -v "$prod_file_suffix"
+	printf "\n" 
+	
+	while true; do
+	read -p "Which command center version do you want to download (copy the entire line from above)? " prod_file
+		if [ $(grep -c "\"name\": \"${prod_file}\"" ${wrkdir}/prod_fileid) -eq 1 ]
+		then
+			fn_download_url
+			break
+		else
+			printf "Sorry can't find that file, please re-enter the product file from the list above\n"
+		fi
+	done
+
+elif [ $to_download == "gpextras" ]; then
+
+ 	export exclude_from_list_gp="for Red Hat Enterprise Linux 5"
+	export exclude_from_list_gpcc="Greenplum Database - Command Center"
+
+	printf "\nThese are the available files:\n\n"
+	sed -n "/\"download\":/,/\"name\":/p" ${wrkdir}/prod_fileid | grep name | cut -d'"' -f4 | grep -v "$exclude_from_list_gpcc" | grep -v "$exclude_from_list_gp" 
+	printf "\n"
+
+	while true; do
+	read -p "Which extra files do you want to download (copy the entire line from above)? " prod_file
+		if [ $(grep -c "\"name\": \"${prod_file}\"" ${wrkdir}/prod_fileid) -eq 1 ]; then
+			prod_file=$(sed 's/[\/]/\\\//g' <<< $prod_file)  #This is to escape the file name that has / on the name ( like PL/PERL ) , since the sed assumes that it is its command
+			fn_download_url
+			break
+		elif [ $(grep -c "\"name\": \"${prod_file}\"" ${wrkdir}/prod_fileid) -gt 1 ]; then
+			echo -e "\nINFO - Found multiple version for file:" $prod_file
+			prod_file=$(sed 's/[\/]/\\\//g' <<< $prod_file)
+			tac ${wrkdir}/prod_fileid | sed -n "/\"name\": \"${prod_file}\"/,/\/download/p" > ${wrkdir}/prod_fileid_version
+			printf "\nThese are the available version for the file:\n\n"
+			tac ${wrkdir}/prod_fileid | sed -n "/\"${prod_file}\"/,/file_version/p" | grep file_version | cut -d '"' -f 4
+			printf "\n"
+			while true; do
+				read -p "Which version of the file \" ${prod_file} \" do you want to download? " prod_file_version
+				if [ $(grep -c "\"file_version\": \"${prod_file_version}\"" ${wrkdir}/prod_fileid_version) -eq 1 ]; then
+					export download_url=$(cat ${wrkdir}/prod_fileid_version | sed -n "/\"file_version\": \"${prod_file_version}\",/,/\/download\"/p"|tail -1|cut -d'"' -f4)
+					[ ${debug} = 'on' ] && echo "download_url=\""${download_url}"\""
+					export target_file=$(basename $(cat ${wrkdir}/prod_fileid_version | sed -n "/\"file_version\": \"${prod_file_version}\",/,/aws_object_key/p"|tail -1|cut -d'"' -f4))
+					[ ${debug} = 'on' ] && echo "target_file=\""${target_file}"\""
+					break
+				else
+					printf "sorry can't find the version, please re-enter the version again from the list above \n"
+				fi
+			done
+			break
+		else
+			printf "Sorry can't find that file, please re-enter the product file from the list above\n"
+		fi
+done
+
+fi
+
+
+
+# Accept EULA
+
+echo "INFO - Accepting the agreement"
+
+curl --silent -H "Accept: application/json" -H "Content-Type: application/json" -H "Content-Length: 0" -H "Authorization: Token ${api_token}" -X POST https://network.pivotal.io/api/v2/products/${prod_slug}/releases/${rel_id}/eula_acceptance | python -mjson.tool > ${wrkdir}/eula_acceptance
+
+if [ $(grep -c "accepted_at" ${wrkdir}/eula_acceptance) -ne 1 ]
+then
+	if [ $(grep -c "\"status\": 401" ${wrkdir}/eula_acceptance) -eq 1 ]
+	then
+		printf "EULA acceptance failed, user could not be authenticated.  Exiting...\n"
+	elif [ $(grep -c "\"status\": 404" ${wrkdir}/eula_acceptance) -eq 1 ]
+	then
+		printf "EULA acceptance failed, product or release cannot be found.  Exiting...\n"
+	else
+		printf "EULA acceptance failed, command reults were:\n"
+		cat ${wrkdir}/eula_acceptance
+		printf "Exiting...\n"
+	fi
+	clean_up
+	exit 1
+fi
+
+# Show environment variables if debug mode is on
+
+if [ ${debug} = 'on' ]
+then
+	echo
+	echo -e "\nDEBUG - Variables to export to match the executed environment \n"
+	echo "export dldir=\""${dldir}"\""
+	echo "export api_token=\""${api_token}"\""
+	echo "export prod_name=\""${prod_name}"\""
+	echo "export prod_slug=\""${prod_slug}"\""
+	echo "export prod_version=\""${prod_version}"\""
+	echo "export prod_id=\""${prod_id}"\""
+	echo "export rel_id=\""${rel_id}"\""
+	echo "export prod_file=\""${prod_file}"\""
+	echo "export download_url=\""${download_url}"\""
+	echo -e "export target_file=\""${target_file}"\" \n"
+fi
+
+# Download product file
+
+echo "INFO - Downloading the file"
+
+wget --output-document="${dldir}/${target_file}" --post-data="" --header="Authorization: Token ${api_token}" ${download_url} --no-check-certificate
+
+# Successful message
+
+prod_file=$(sed 's/[\\]//g' <<< $prod_file)
+echo "INFO - Download successful, file: \""$prod_file"\" , Location: \""${dldir}"\""
+printf "\n"
+
+# Clean up on exit
+
+clean_up
+exit 0

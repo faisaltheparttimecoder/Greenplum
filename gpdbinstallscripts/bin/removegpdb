@@ -1,0 +1,177 @@
+#!/bin/bash
+
+# parameters
+
+echo "INFO - Checking if the parameters is passed"
+
+if [ $# -eq 0 ]; then
+    echo "ERROR - No arguments provided, please reexecute the script along with the version of the database that you need to install (for egs <scriptname> 4.3.4.0)"
+    exit 1
+fi
+
+# Parameters for the script 
+
+echo "INFO - Generating the location / directories where the output logs will saved / stored"
+
+export version=$1
+export script=$0
+export script_basename=`basename $script`
+export script_dir=`dirname $script`/..
+cd $script_dir
+export script_dir=`pwd`
+export install_dir=`dirname $script_dir`
+export wrkdir=/tmp/wrkdir.$$
+export tempdir=$script_dir/tmp
+export dldir=$script_dir/gpdbsoftwares
+export ftref=$script_dir/futurereference
+export envstatus=$tempdir/envstatus.$crdt
+
+# Building gpcc cleanup function if installed
+
+gpcc_cleanup() {	
+	cc_instance=`grep cc_instance ${ftref}/$location| cut -d'=' -f2`
+	gpcmdr --stop $cc_instance &>/dev/null
+	rm -rf $GPPERFMONHOME/instances/$cc_instance &>/dev/null
+}
+
+# Building gpdb cleanup function
+
+gpdb_cleanup() {
+
+source ${ftref}/$location
+timestamp=`echo ${location}|cut -d'_' -f2`
+psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - The database is up and running attempting to use gpdeletesystem to uninstall the database"
+	gpdeletesystem -d $MASTER_DATA_DIRECTORY -f
+	retcode=$?
+	if [ "$retcode" == "0" ]; then
+		echo "INFO - The environment has been successfully cleaned up"
+		gpcc_cleanup
+		rm -rf ${ftref}/${location}
+		rm -rf ${ftref}/uninstall${version}_${timestamp}
+	elif [ "$retcode" == "2" ]; then
+		echo "ERROR - User Cancelled the activity or gpdeletesystem failed"
+		echo "INFO - Requesting to cleanup using a alternative method"
+		printf "\n"
+		while true 
+		do
+		read -p "Do you wish to use unix method to cleanup the database installation i.e running ${ftref}/uninstall${version}_${timestamp} (y/n)? " response
+		 if [ $response == "Y" ] || [ $response == "y" ]; then
+		 	break
+		 elif [ $response == "n" ] || [ $response == "N" ]; then
+		 	echo "INFO - exiting.."
+		 	exit
+		 else
+		 	echo "Invalid response, type in y/n"
+		 fi
+    	done
+    	echo "INFO - Removing the gpdb installation for timestamp:" $timestamp
+		gpcc_cleanup
+		/bin/bash ${ftref}/uninstall${version}_${timestamp}
+	else 
+		echo "INFO - gpdeletesystem failed, using unix method to clean up the installation"
+		echo "INFO - Removing the gpdb installation for timestamp:" $timestamp
+		gpcc_cleanup
+		/bin/bash ${ftref}/uninstall${version}_${timestamp}
+	fi
+else
+	echo "INFO - The database is not started, starting the database environment up"
+	gpstart -a
+	psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+	retcode=$?
+	if [ "$retcode" == "0" ]; then
+		echo "INFO - The database is up and running attempting to use gpdeletesystem to uninstall the database"
+		gpdeletesystem -d $MASTER_DATA_DIRECTORY -f 
+		retcode=$?
+		if [ "$retcode" == "0" ]; then
+			echo "INFO - The environment has been successfully cleaned up"
+			gpcc_cleanup
+			rm -rf ${ftref}/${location}
+			rm -rf ${ftref}/uninstall${version}_${timestamp}
+		elif [ "$retcode" == "2" ]; then
+			echo "ERROR - User Cancelled the activity or gpdeletesystem failed"
+			echo "INFO - Requesting to cleanup using a alternative method"
+			printf "\n"
+			while true 
+			do
+				read -p "Do you wish to use unix method to cleanup the database installation i.e running ${ftref}/uninstall${version}_${timestamp} (y/n)?" response
+				if [ $response == "Y" ] || [ $response == "y" ]; then
+					break
+		 		elif [ $response == "n" ] || [ $response == "N" ]; then
+		 			echo "INFO - exiting.."
+		 			exit
+		 		else
+		 			echo "Invalid response, type in y/n"
+		 		fi
+    		done
+    	echo "INFO - Removing the gpdb installation for timestamp:" $timestamp
+		gpcc_cleanup
+		/bin/bash ${ftref}/uninstall${version}_${timestamp}
+		else 
+			echo "INFO - gpdeletesystem failed, using unix method to clean up the installation"
+			echo "INFO - Removing the gpdb installation for timestamp:" $timestamp
+			gpcc_cleanup
+			/bin/bash ${ftref}/uninstall${version}_${timestamp}
+		fi
+	 else
+        echo "INFO - The database failed to start, Using the unix commands to clean up the environment"
+        echo "INFO - Removing the gpdb installation for timestamp:" $timestamp
+        gpcc_cleanup
+        /bin/bash ${ftref}/uninstall${version}_${timestamp}
+	fi
+fi
+}
+
+# Get the environment file
+
+echo "INFO - Getting the environment information of the gpdb cluster with version:" $version
+
+version_file_count=`ls ${ftref} | grep env$version | wc -l`
+if [  "$version_file_count" == "0" ]; then
+	echo "ERROR - No prior installation of gpdb version: $version found, nothing to uninstall here, exiting..."
+	exit
+elif [ "$version_file_count" == "1" ]; then
+	location=`ls -1 ${ftref} | grep env$version`
+	gpdb_cleanup
+else
+	echo -e "Environment File\t\t\tMaster Port\t\t\tStatus" 	> $envstatus
+	echo "--------------------------------------------------------------------------------------------------"		>> $envstatus
+	ls -1 ${ftref} | grep env$version | while read line
+	do		
+		source ${ftref}/$line		
+		psql -d template1 -p $PGPORT -Atc "select 1" &>/dev/null
+		retcode=$?
+		if [ "$retcode" == "0" ]; then
+			echo -e "$line\t\t\t$PGPORT\t\t\tRUNNING" 	>> $envstatus
+		else
+			echo -e "$line\t\t\t$PGPORT\t\t\tUNKNOWN/STOPPED/FAILED"	>> $envstatus
+		fi
+	done
+	printf "\n"
+	cat $envstatus
+	printf "\n"
+	while true 
+	do
+		read -p "Found multiple installation for the gpdb version: $version, Copy paste the filename or else type "a" to remove all: " response
+		if [ "$response" == "a" ]; then
+			for filename in `ls -1 ${ftref} | grep env$version`
+			do
+				location="$filename"
+				gpdb_cleanup
+			done
+			break
+		elif [ `ls ${ftref} | grep $response | wc -l` == "1" ]; then
+			location="$response"
+			gpdb_cleanup
+			break
+		else
+			echo "Invalid response, Could not find the values that was typed in, try again ..."
+		fi
+    done
+fi
+
+# Uninstallation success message
+
+echo "INFO - Uninstallation of gpdb for timestamp:" $timestamp "is a success"

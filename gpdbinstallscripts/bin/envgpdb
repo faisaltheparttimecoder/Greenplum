@@ -1,0 +1,141 @@
+#!/bin/bash
+
+# Parameters
+
+echo "INFO - Checking if the parameters is passed"
+
+if [ $# -eq 0 ]; then
+    echo "ERROR - No arguments provided, provide version like <scriptname> 4.3.4.0 or use -l to list all installation"
+    exit 1
+fi
+
+# Parameters for the script 
+
+echo "INFO - Generating the location / directories where the environment is stored / saved"
+
+export version=$1
+export script=$0
+export script_basename=`basename $script`
+export script_dir=`dirname $script`/..
+cd $script_dir
+export script_dir=`pwd`
+export install_dir=`dirname $script_dir`
+export wrkdir=/tmp/wrkdir.$$
+export ftref=$script_dir/futurereference
+export tempdir=$script_dir/tmp
+export crdt=`date +"%d%m%Y%H%M%S"`
+export envstatus=$tempdir/envstatus.$crdt
+
+# Displaying all the installation on the server if the parameter given is -l
+
+if [ "$1" == "-l" ];then
+	echo "INFO - Getting list of all installation on the server"
+	echo -e "Environment File\t\t\tMaster Port\t\t\tStatus\t\t\tGPCC Instance Name" 	> $envstatus
+	echo "--------------------------------------------------------------------------------------------------------------------------------------------"		>> $envstatus
+	ls -1 ${ftref} | grep env | sort -n | while read line
+	do
+		source ${ftref}/$line
+		psql -d template1 -p $PGPORT -Atc "select 1" &>/dev/null
+		retcode=$?
+		if [ "$retcode" == "0" ]; then
+			echo -e "$line\t\t\t$PGPORT\t\t\tRUNNING\t\t\t$cc_instance" 	>> $envstatus
+		else
+			echo -e "$line\t\t\t$PGPORT\t\t\tUNKNOWN\t\t\t$cc_instance"	>> $envstatus
+		fi
+		unset cc_instance
+	done
+	printf "\n"
+	cat $envstatus
+	printf "\n"
+	rm $envstatus &>/dev/null
+	exit 
+fi
+
+# Get the environment file
+
+echo "INFO - Getting the environment information of the gpdb cluster with version:" $version
+
+version_file_count=`ls ${ftref} | grep env$version | wc -l`
+if [  "$version_file_count" == "0" ]; then
+	echo "ERROR - No prior installation of gpdb found, please use \"installgpdb <version>\" to install the database environment "
+	exit
+elif [ "$version_file_count" == "1" ]; then
+	location="${ftref}/`ls -1 ${ftref} | grep env$version`"
+	source $location
+else
+	echo -e "Environment File\t\t\tMaster Port\t\t\tStatus" 	> $envstatus
+	echo "-----------------------------------------------------------------------------------------------"		>> $envstatus
+	ls -1 ${ftref} | grep env$version | while read line
+	do		
+		source ${ftref}/$line
+		psql -d template1 -p $PGPORT -Atc "select 1" &>/dev/null
+		retcode=$?
+		if [ "$retcode" == "0" ]; then
+			echo -e "$line\t\t\t$PGPORT\t\t\tRUNNING" 	>> $envstatus
+		else
+			echo -e "$line\t\t\t$PGPORT\t\t\tUNKNOWN/STOPPED/FAILED"	>> $envstatus
+		fi
+	done
+	printf "\n"
+	cat $envstatus
+	printf "\n"
+	while true 
+	do
+		read -p "Found multiple installation for the gpdb version: $version, which environment file do you want to use? " response
+		if [ `ls ${ftref} | grep $response | wc -l` == "1" ]; then
+			location="${ftref}/$response"
+			source $location
+			break
+		else
+			echo "Invalid response, Could not find the values that was typed in, try again ..."
+		fi
+    done
+fi
+
+# Checking is the database started else start the database
+
+psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - The environment is up and running and you are good to go"
+else
+	echo "INFO - The database is not started, starting the database environment up"
+	gpstart -a
+	psql -p $PGPORT -d template1 -Atc "select 1" &>/dev/null
+	retcode=$?
+	if [ "$retcode" == "0" ]; then
+		echo "INFO - The environment is up and running and you are good to go"
+	else 
+		echo "ERROR - Failure in starting the database environment"
+		exit
+	fi
+fi
+
+# Starting the gpcc instance if the database environment has one
+	
+cc_instance=`grep cc_instance $location| cut -d'=' -f2`
+#echo $cc_instance
+gpcmdr --start $cc_instance &>/dev/null
+retcode=$?
+if [ "$retcode" == "0" ]; then
+	echo "INFO - The GPCC instance" ${cc_instance} "is also up and running and you are good to go"
+else 
+	echo "ERROR - Failure in starting the GPCC for the database environment or it could be its already running or not setup on this environment"
+fi
+
+# Cleaning the temporary files created
+
+echo "INFO - Cleaning the temporary files created"
+
+rm -rf $envstatus &>/dev/null
+
+# Successful message
+
+echo "INFO - Setting up environment is complete"
+
+# Setting the environment of the installation
+
+echo -e "INFO - Source the below file to use your environment (since the source only works on the current shell)\n"
+
+echo "source $location"
+printf "\n"

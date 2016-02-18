@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Getting the list of database running and stooping them 
+
+echo "INFO - Getting the information of the database currently running and stopping them"
+
+ps -ef | grep silent | grep master | while read line
+do
+	GPHOME=`echo $line|awk '{print $8}'| rev | cut -d'/' -f3- | rev`
+	export MASTER_DATA_DIRECTORY=`echo $line|awk '{print $10}'`
+	export PGPORT=`echo $line|awk '{print $12}'`
+	export PGDATABASE=template1
+	echo -e "\nINFO - stopping the database with MASTER_DATA_DIRECTORY:" $MASTER_DATA_DIRECTORY "& PORT:" $PGPORT "\n"
+	source $GPHOME/greenplum_path.sh
+	gpstop -af
+done
+
+# Checking for any unsuccessful stop
+
+count=`ps -ef | grep postgres | grep -v grep | wc -l`
+if [ "$count" != "0" ] ; then
+	echo "ERROR - Seems there are some gpdb environment that couldnt be stopped, as postgres process is still found on the server"
+	exit
+else
+	echo "INFO - No postgres found on the cluster, seems like all the database has been stopped"
+fi
+
+# stopping success message
+
+echo "INFO - Stopping all database program has completed successfully"
+
+
