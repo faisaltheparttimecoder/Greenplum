@@ -1,0 +1,1 @@
+select * from gp_master_mirroring ;
