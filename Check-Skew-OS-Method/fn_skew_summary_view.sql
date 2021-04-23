@@ -60,7 +60,7 @@ BEGIN
                  '      sum(db.size) as size ' ||
                  '      FROM db_files db ' ||
                  '      JOIN pg_class c ON ' ||
-                 '      split_part(db.relfilenode, ''.'', 1) = c.relfilenode ' ||
+                 '      split_part(db.relfilenode, ''.'', 1) = c.relfilenode::text ' ||
                  '      JOIN pg_namespace n ON c.relnamespace = n.oid ' ||
                  '      WHERE c.relkind = ''r'' ' ||
                  '      GROUP BY n.nspname, c.relname, db.segment_id ' ||
