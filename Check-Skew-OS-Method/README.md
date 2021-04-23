@@ -21,11 +21,11 @@ SELECT fn_create_db_files();
 + Now use the view to obtain the information
 
 ```
-SELECT * FROM vw_file_skew ORDER BY 3 DESC;
+SELECT * FROM vw_file_skew ORDER BY 3 DESC LIMIT 10;
 ```
 
 + To use the second function use 
 
 ```
-select * from public.fn_get_skew();
+select * from public.fn_get_skew() LIMIT 10;
 ```

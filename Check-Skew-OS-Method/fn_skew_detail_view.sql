@@ -1,6 +1,7 @@
 CREATE OR REPLACE FUNCTION public.fn_get_skew(out schema_name      varchar,
                                               out table_name       varchar,
                                               out pTableName       varchar,
+                                              out owner_name       varchar,
                                               out total_size_GB    numeric(15,2),
                                               out seg_min_size_GB  numeric(15,2),
                                               out seg_max_size_GB  numeric(15,2),
@@ -47,6 +48,7 @@ BEGIN
     for v_res in (
                 select  sub.vschema_name,
                         sub.vtable_name,
+                        sub.vowner_name,
                         (sum(sub.size)/(1024^3))::numeric(15,2) AS vtotal_size_GB,
                         --Size on segments
                         (min(sub.size)/(1024^3))::numeric(15,2) as vseg_min_size_GB,
@@ -60,16 +62,17 @@ BEGIN
                         SELECT  n.nspname AS vschema_name,
                                 c.relname AS vtable_name,
                                 db.segment_id,
-                                sum(db.size) AS size
+                                sum(db.size) AS size,
+                                pg_catalog.pg_get_userbyid(c.relowner) as vowner_name
                             FROM ONLY public.db_files_ext db
                                 JOIN pg_class c ON split_part(db.relfilenode, '.'::text, 1) = c.relfilenode::text
                                 JOIN pg_namespace n ON c.relnamespace = n.oid
                             WHERE c.relkind = 'r'::"char"
                                 and n.nspname not in ('pg_catalog','information_schema','gp_toolkit')
                                 and not n.nspname like 'pg_temp%'
-                            GROUP BY n.nspname, c.relname, db.segment_id
+                            GROUP BY n.nspname, c.relname, db.segment_id,c.relowner
                         ) sub
-                    group by 1,2
+                    group by 1,2,3
                     --Extract only table bigger than 1 GB
                     --   and with a skew greater than 20%
                     /*having sum(sub.size)/(1024^3) > 1
@@ -78,6 +81,7 @@ BEGIN
                     limit 100*/ ) loop
         schema_name         = v_res.vschema_name;
         table_name          = v_res.vtable_name;
+        owner_name          = v_res.vowner_name;
         total_size_GB       = v_res.vtotal_size_GB;
         seg_min_size_GB     = v_res.vseg_min_size_GB;
         seg_max_size_GB     = v_res.vseg_max_size_GB;
