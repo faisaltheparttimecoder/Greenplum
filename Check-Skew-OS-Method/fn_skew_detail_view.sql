@@ -75,10 +75,10 @@ BEGIN
                     group by 1,2,3
                     --Extract only table bigger than 1 GB
                     --   and with a skew greater than 20%
-                    /*having sum(sub.size)/(1024^3) > 1
+                    having sum(sub.size)/(1024^3) > 1
                         and (100*(max(sub.size) - min(sub.size))/greatest(max(sub.size),1))::numeric(6,2) > 20
                     order by 1,2,3
-                    limit 100*/ ) loop
+                    limit 100 ) loop
         schema_name         = v_res.vschema_name;
         table_name          = v_res.vtable_name;
         owner_name          = v_res.vowner_name;
