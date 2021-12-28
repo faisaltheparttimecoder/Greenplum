@@ -52,20 +52,22 @@ BEGIN
         v_sql := 'CREATE OR REPLACE VIEW vw_file_skew AS ' ||
                  'SELECT schema_name, ' ||
                  'table_name, ' ||
+                 'owner, ' ||
                  'max(size)/sum(size) as largest_segment_percentage, ' ||
                  'sum(size) as total_size ' ||
                  'FROM	( ' ||
                  'SELECT n.nspname AS schema_name, ' ||
                  '      c.relname AS table_name, ' ||
-                 '      sum(db.size) as size ' ||
+                 '      sum(db.size) as size, ' ||
+                 '      pg_catalog.pg_get_userbyid(c.relowner) as owner' ||
                  '      FROM db_files db ' ||
                  '      JOIN pg_class c ON ' ||
-                 '      split_part(db.relfilenode, ''.'', 1) = c.relfilenode ' ||
+                 '      split_part(db.relfilenode, ''.'', 1) = c.relfilenode::text ' ||
                  '      JOIN pg_namespace n ON c.relnamespace = n.oid ' ||
                  '      WHERE c.relkind = ''r'' ' ||
-                 '      GROUP BY n.nspname, c.relname, db.segment_id ' ||
+                 '      GROUP BY n.nspname, c.relname, db.segment_id,c.relowner ' ||
                  ') as sub ' ||
-                 'GROUP BY schema_name, table_name ' ||
+                 'GROUP BY schema_name, table_name, owner ' ||
                  'HAVING sum(size) > 0 and max(size)/sum(size) > ' || 
                  v_skew_amount::text || ' ' || 
                  'ORDER BY largest_segment_percentage DESC, schema_name, ' ||

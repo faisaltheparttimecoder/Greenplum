@@ -1,1 +1,1 @@
-Some General adminsitration tools for greenplum database
+Some General adminsitration tools for greenplum database server
